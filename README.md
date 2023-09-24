@@ -3,7 +3,7 @@ Today I Learn
 
 ## DBMS
 - MySQL
-    - [RealMySQL](./db/MySQL/[RealMySQL]05트랜잭션과잠금.md)
+    - [RealMySQL](./DBMS/MySQL/RealMySQL_05_트랜잭션과잠금.md)
 - Oracle
 - PostgreSQL
 
