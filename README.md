@@ -3,8 +3,10 @@ Today I Learn
 
 ## DBMS
 - MySQL
-    - [RealMySQL_05-06](./DBMS/MySQL/RealMySQL_05_06.md)
-    - [RealMySQL_07-08](./DBMS/MySQL/RealMySQL_07_08.md)
+    - [RealMySQL 05.트랜잭션과 잠금](./DBMS/MySQL/RealMySQL_05.md)
+    - [RealMySQL_06.데이터 압축](./DBMS/MySQL/RealMySQL_06.md)
+    - [RealMySQL_07.데이터 암호화](./DBMS/MySQL/RealMySQL_07.md)
+    - [RealMySQL_08.인덱스](./DBMS/MySQL/RealMySQL_08.md)
 - Oracle
 - PostgreSQL
 
