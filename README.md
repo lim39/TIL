@@ -22,3 +22,7 @@ Today I Learn
 ## Tuning
 - Oracle
 
+## Computer Science
+- OS
+    - [공룡책_ch08.Dead Locks](./OS/공룡책_ch08.md)
+    - [공룡책_ch09.Main Memory](./OS/공룡책_ch09.md)
