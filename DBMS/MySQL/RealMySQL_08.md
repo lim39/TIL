@@ -141,7 +141,7 @@
 
 ### 8.3.6 B-Tree 인덱스의 정렬 및 스캔 방향
 - 인덱스를 생성할 때 설정한 정렬 규칙에 따라 오름차순 또는 내림차순으로 정렬되어 저장됨
-- 오름차순으로 저장됐다고 해도, 거꾸로 읽으면 내림차순으로 정렬된 인덱스로 사용 가능 > 정렬 규칙은 크게 의미 없음
+- 오름차순으로 저장됐다고 해도, 거꾸로 읽으면 내림차순으로 정렬된 인덱스로 사용 가능 (결과는 같지만 실제 성능 차이는 있음)
 - 인덱스 읽는 방향은 옵티마이저가 정한대로 읽힘
 
 #### 8.3.6.1 인덱스의 정렬
@@ -150,9 +150,173 @@
     ```sql
     CREATE INDEX ix_teamname_userscore ON employees (team_name ASC, user_score DESC);
     ```
-#### 8.3.6.2 인덱스 스캔 방향
+#### 8.3.6.1.1 인덱스 스캔 방향
 - 인덱스 생성 시점에 오름차순 또는 내림차순으로 정렬이 결정되지만, 사용 시점에 인덱스 읽는 방향을 그대로 할지 역으로 할지 옵티마이저가 정하기 떄문에 생성 시점 정렬 순서는 크게 의미 없음
 - 쿼리의 `ORDER BY` 처리나 `MIN`,`MAX` 함수 등의 최적화가 필요한 경우에도 인덱스의 읽기 방향을 전환해서 사용하도록 실행 계획을 만듦
 
-#### 8.3.6.3 내림차순 인덱스
-- 
+#### 8.3.6.1.2 내림차순 인덱스
+- 내부적으로 InnoDB에서 인덱스 역순 스캔이 인덱스 정순 스캔에 비해 느릴 수 밖에 없는 두 가지 이유
+    - 페이지 내에서 인덱스 레코드가 단방향으로만 연결된 구조
+    - 페이지 잠금이 인덱스 정순 스캔(Forward index scan)에 적합한 구조
+        - 테이블 생성 시 pk가 역순이라면?
+        - 인덱스 역순 스캔에 적합한 구조가 되는 것인지?
+        - 실습    
+            ```sql
+            drop table t2;
+            create table t2 (
+                tid int not null auto_increment,
+                table_name varchar(64),
+                column_name	varchar(64),
+                ordinal_position int,
+                primary key(tid desc)
+            ) engine= innodb;
+
+            insert into t2
+            select null,table_name,column_name,ordinal_position
+            from information_schema.columns;
+
+            insert into t2 
+            select null, table_name, column_name, ordinal_position
+            from t2;
+
+            -- 58032128
+            select count(*) from t2;
+
+            -- 13.697s
+            select * from t2 order by tid asc limit 58032127,1;
+
+            -- 11.392s
+            select * from t2 order by tid desc limit 58032127,1;
+            ```
+- 많은 쿼리가 인덱스의 앞 또는 뒤쪽만 집중적으로 읽어서 인덱스 페이지 병목이 예상된다면, **쿼리에서 자주 사용되는 정렬 순서로 인덱스를 생성하는 것이 좋음**
+
+### 8.3.7 B-Tree 인덱스의 가용성과 효율성
+- 쿼리의 WHERE 조건이나, GROUP BY, 또는 ORDER BY 절이 어떤 경우에 인덱스를 사용할 수 있고 어떤 방식으로 사용할 수 있는지 식별할 수 있어야 함
+- 어떤 경우에 100% 활용되는지, 일부만 이용되는 지 => 인덱스 스캔 범위 비효율이 없어야 랜덤 I/O 수를 줄일 수 있음
+
+#### 8.3.7.1 비교 조건의 종류와 효율성
+- 다중 컬럼 인덱스에서 각 컬럼의 순서와 그 컬럼에 사용된 조건이 동등 비교('=')인지 아니면 범위 조건('<','>')인지에 따라 인덱스 컬럼 활용 형태가 달라짐
+- 예제) 
+    - 인덱스 구성
+        idx_A: (dept_no, emp_no)
+        idx_B: (emp_no, dept_no)
+    - 조회 쿼리문
+        ```sql
+        SELECT * FROM dept_emp
+        WHERE dept_no= 'd002'
+            AND emp_no >= 10114
+        ;
+        ```
+    - 인덱스별 스캔 범위(그림)
+        ![Alt text](./capture/image_8_17.png)
+- 참고) 다중 컬럼 인덱스 순서 배치 우선 순위
+    - 자주 사용 되는가?
+    - '=' 조건
+    - 소트연산 대체
+    - 기수성(Cardinality), 선택도
+- 참고) [인덱스 컬럼 우선순위 예시(csv)](./%EC%9D%B8%EB%8D%B1%EC%8A%A4%20%EC%BB%AC%EB%9F%BC%20%EC%9A%B0%EC%84%A0%EC%88%9C%EC%9C%84%08%20%EC%98%88%EC%8B%9C.xlsx)
+
+#### 8.3.7.2 인덱스의 가용성
+- B-Tree 인덱스는 왼쪽 값에 기준해서 오른쪽 값이 정렬돼 있음
+- 인덱스 스캔 시작점을 알 수 없으면 인덱스 레인지 스캔이 불가능 함
+- 예시1) idx: (first_name)
+    ```sql
+    SELECT * FROM employees WHERE first_name LIKE '%mer';
+    ```
+    - 정렬 우선순위가 낮은 뒷부분의 값만으로는 왼쪽 기준 정렬 기반의 인덱스인 B-Tree에서는 인덱스 효과를 얻을 수 없음
+    - 인덱스 스캔 시작점을 찾을 수 없기 떄문에 인덱스 타지 않음
+- 예시2) idx: (dept_no, emp_no)
+    ```sql
+    SELECT * FROM dept_emp WHERE emp_no >= 10144;
+    ```
+    - 인덱스의 선행 컬럼인 dept_no 조건이 없기 때문에, 마찬가지로 인덱스 스캔 시작점을 찾을 수 없음
+- GROUP BY나 ORDER BY 에서도 똑같이 적용됨
+
+#### 8.3.7.3 가용성과 효율성 판단
+- 인덱스 선두 컬럼이 조건으로 존재해도 작업 범위 결정 조건로 사용할 수 없는 경우
+    - NOT-EQUAL로 비교된 경우(<>, NOT IN, NOT BETWEEN, IS NOT NULL)
+        ```sql
+        WHERE column <> 'N' or column NOT IN (10,11,12) or column IS NOT NULL
+        ```
+    - LIKE '%??' 형태로 문자열 패턴이 비교된 경우
+        ```sql
+        WHERE column LIKE '%승' or column LIKE '%승환' or column LIKE '_승환'
+        ```
+    - 인덱스 컬럼의 가공
+        ```sql
+        WHERE SUBSTRING(column,1,1)='X'
+        ```
+    - NOT-DETERMINISTIC 속성의 스토어드 함수가 비교 조건에 사용된 경우
+        ```sql
+        WHERE column = deterministic_function()
+        ```
+    - 데이터 타입이 서로 다른 비교
+        ```sql
+        WHERE char_column = 10
+        ```
+    - 문자열 데이터 타입의 콜레이션이 다른 경우
+        ```sql
+        WHERE utf8_bin_char_column = eucker_bin_char_column
+        ```
+    - 인덱스 선두 컬럼 조건이 없는 경우
+- 작업 범위 결정 조건으로 인덱스를 사용하는 경우
+    - column_1 ~ column_(i-1) 컬럼까지 동등 비교 형태('=',IN)로 비교
+    - column_i 컬럼에 대해 다음 연산자 중 하나로 비교
+        - 동등 비교('=',IN)
+        - 범위 비교('<','>')
+        - LIKE,BETWEEN
+- 타 DBMS 들이랑은 다르게 MySQL은 **인덱스에 NULL 값이 저장됨**
+    ```sql
+        WHERE column IS NULL
+    ```
+    - 위와 같은 조건도 작업 범위 결정 조건으로 인덱스를 사용함
+- 참고) 인덱스 매칭도
+    - 작업 범위 결정 조건(드라이빙 조건)과 체크 조건 판단 예시
+        - index: (컬럼1, 컬럼2, 컬럼3, 컬럼4)
+    
+        | 인덱스 컬럼 | 조건 1 | 조건 2 | 조건 3 | 조건 4 | 조건 5 |
+        | --- | --- | --- | --- | --- | --- |
+        | 컬럼1 | **BETWEEN** | = | = | = | IN |
+        | 컬럼2 | = | = | **>=** | IN | = |
+        | 컬럼3 | = | **LIKE** | = | **<** | = |
+        | 컬럼4 | LIKE | = | BETWEEN | = | **>** |
+        | 매칭도 | 1 | 3 | 2 | 3 | 4 |
+
+---
+
+## 8.4 R-Tree(Rectangle-Tree) 인덱스
+- MySQL의 공간 인덱스는 R-Tree 인덱스 알고리즘을 이용해 2차원의 데이터를 인덱싱하고 검색하는 목적의 인덱스
+- 기본적인 내부 메커니즘은 B-Tree와 흡사함
+- B-Tree는 인덱스를 구성하는 컬럼의 값이 1차원, **R-Tree는 2차원의 공간 개념 값**
+- MySQL의 공간 확장에는 크게 세 가지 기능이 포함
+    - 공간 데이터를 저장할 수 있는 데이터 타입
+    - 공간 데이터의 검색을 위한 공간 인덱스(R-Tree 알고리즘)
+    - 공간 데이터의 연산 함수(거리 또는 포함 관계의 처리)
+
+### 8.4.1 구조 및 특성
+- MySQL은 공간 정보의 저장 및 검색을 위해 여러 가지 기하학적 도형 정보를 관리할 수 있는 데이터 타입을 제공함 = GEOMETRT TYPE
+- MBR들의 포함 관계를 B-Tree 형태로 구현한 인덱스가 R-Tree 인덱스임
+    - MBR이란, 'Minimum Bounding Rectangle'의 약자로 해당 도형을 감싸는 최소 크기의 사각형을 의미함
+    ![Alt text](./capture/R-Tree.png)
+
+### 8.4.2 R-Tree 인덱스의 용도
+- R-Tree는 각 도형의 MBR 간의 포함 관계를 이용해 만들어진 인덱스
+- R-Tree는 ST_Contains() or ST_Within() 등과 같은 포함 관계를 비교하는 함수를 사용해야 검색 가능
+- 대표적으로 '현재 사용자의 위치로부터 반경 5km 이내의 음식점 검색' 등과 같은 검색에 사용할 수 있음
+    ![Alt text](./capture/R-Tree_EX.png)
+    - 기준점 P로부터 반경 5km의 최소 사각형 내 있는 좌표 검색
+        ```sql
+        -- ST_Contains() 함수는 첫 번째 파라미터로 포함 경계를 가진 도형을 명시하고, 두 번쨰 파라미터로 포함되는 도형을 명시해야 함
+        SELECT * FROM tb_location
+        WHERE ST_Contains(사각 상자, px);
+
+        -- ST_Within() 함수는 첫 번째 파라미터로 포함되는 도형을 명시하고, 두 번째 파라미터로 포함 경계를 가진 도형을 명시해야 함
+        SELECT * FROM tb_location
+        WHERE ST_Within(px,사각 상자);
+        ```
+    - 반경 5km 밖에 있는 P6까지 제거하기 위한 쿼리
+        ```sql
+        SELECT * FROM tb_location
+        WHERE ST_Contains(사각상자 ,px) -- 공간 좌표 Px가 사가가 상자에 포함되는지 비교
+        AND ST_Distance_Sphere(p,px)<=5*1000 /* 5km */ >
+        ```
