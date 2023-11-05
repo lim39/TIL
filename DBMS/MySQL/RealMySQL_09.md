@@ -322,6 +322,7 @@ mysql> SHOW STATUS LIKE 'Sort%';
     - 드리븐 테이블 - 조인되는 테이블에서 드라이빙이 아닌 테이블들  
 
 #### 9.3.1.2 블록 네스티드 루프 조인(block_nested_loop)
+- 8.0.20 버전 부터는 해시 조인 알고리즘이 대체되어 사용되기 떄문에, BNL조인이 뭔지만 알고 넘어가면 됨
 - **BNL(Block Nested Loop)조인 = 조인 버퍼를 사용한 조인**
     - 조인 알고리즘에서 "Block"이란 단어가 사용되면 조인용 버퍼가 사용됐다는 것을 의미함
     - 실행 계획에서 Extra 컬럼에 "Using Join buffer"라는 문구가 표시되면 조인 버퍼를 사용한다는 의미
@@ -347,4 +348,19 @@ mysql> SHOW STATUS LIKE 'Sort%';
         1. `employees` 테이블의 PK를 이용해 조건을 만족하는 레코드를 검색
         1. 3번에서 검색된 결과(employees)에 2번의 캐치된 조인 버퍼의 레코드(dept_emp)를 결합해서 반환함
 
-#### 8.3.1.3 인덱스 컨디션 푸시다운(index_condition_pushdown)
+#### 9.3.1.3 인덱스 컨디션 푸시다운(index_condition_pushdown)
+- 인덱스 컨디션 푸시다운이란, 인덱스 컬럼이 체크조건으로 사용됐을 때 인덱스 스캔 후 조건에 부합하지 않는 레코드들은 필터링하여 테이블 읽기를 수행하지 않게 해주는 기능
+    - 체크조건(또는 필터링조건)이란 데이터를 모두 읽은 후 사용자가 원하는 결과인지 하나씩 비교해보는 조건
+- 무조건 켜는게 유리한 기능
+- 실행계획 상 "Using where"가 표시됐으면 인덱스 컨디션 푸시다운이 활성화되지 않았음을 의미함
+
+- 인덱스 컨디션 푸시다운 예제
+    - 생성된 인덱스 ix_lastname_firstname: last_name,first_name 
+    ```sql
+    SELECT * FROM employees WHERE last_name=’Action’ AND first_name LIKE ‘%sal’;
+    ``` 
+    - last_name=’Action’은 ix_lastname_firstname을 인덱스 레인지 스캔으로 사용할 수 있지만, first_name LIKE ‘%sal’ 는 체크조건으로 사용함
+    - 인덱스 컨디션 푸시다운을 껐을때
+    ![Alt text](./capture/index_condition_pushdown_off.png)
+    - 인덱스 컨디션 푸시다운을 켰을때
+    ![Alt text](./capture/index_condition_pushdown_on.png)
