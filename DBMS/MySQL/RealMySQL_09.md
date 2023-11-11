@@ -364,3 +364,263 @@ mysql> SHOW STATUS LIKE 'Sort%';
     ![Alt text](./capture/index_condition_pushdown_off.png)
     - 인덱스 컨디션 푸시다운을 켰을때
     ![Alt text](./capture/index_condition_pushdown_on.png)
+
+#### 9.3.1.4 인덱스 확장(use_index_extensions)
+- `use_index_extensions` 옵티마이저 옵션은 InnoDB 스토리지 엔진을 사용하는 테이블에서 세컨더리 인덱스에 자동으로 추가된 PK를 활용여부를 결정하는 옵션
+- 세컨더리 인덱스 예제
+    - PK,세컨더리 인덱스를 갖는 테이블
+        ```sql
+        CREATE TABLE dept_emp(
+            emp_no INT NOT NULL,
+            dept_no CHAR(4) NOT NULL,
+            from_date DATE NOT NULL,
+            to_date DATE NOT NULL,
+            PRIMARY KEY(dept_no,emp_no),
+            KEY ix_fromdate(from_date)
+        ) ENGINE=InnoDB;
+        ```
+    - 세컨더리 인덱스로 레코드를 찾아가기 위해서 PK인 dept_no, emp_no 컬럼을 순서대로 포함하여, (from_date, dept_no, emp_no)의 조합인 인덱스를 생성한 것과 흡사하게 작동할 수 있음
+        - 세컨더리 인덱스를 타면 정렬 연산(Filesort) 생략 가능해짐
+        ```sql
+        SELECT * FROM dept_emp WHERE from_date= '1987-07-25' ORDER BY dept_no;
+        ```
+- 예전 MySQL 버전에서는 세컨더리 인덱스의 마지막에 자동 추가되는 PK를 제대로 활용하지 못했음
+- 서버가 업그레이드 되면서 옵티마이저는 ix_fromdate 인덱스 마지막에 (dept_no,emp_no) 컬럼이 숨어있다는 것을 인지하고 실행 계획을 수립하도록 개선됨
+
+#### 9.3.1.5 인덱스 머지(index_merge)
+- 하나의 테이블에 대해 2개 이상의 인덱스를 이용해 쿼리를 처리할 수 있는 옵티마이저 옵션
+- 인덱스 머지 실행 계획을 사용하는 경우
+    -> 쿼리에 사용된 각각의 조건이 서로 다른 인덱스를 사용할 수 있고, 그 조건을 만족하는 레코드 건수가 많을 것으로 예상될 떄
+- 인덱스 머지 실행 계획을 3개의 세부 실행 계획으로 나눌 수 있음
+    - `index_merge_intersection`
+    - `index_merge_sort_union`
+    - `index_merge_union`
+- 3개의 최적화 옵션을 한 번에 모두 제어할 수 있는 옵션이며, 각각의 최적화 알고리즘에 대해서는 하나씩 예제로 살펴보자
+
+#### 9.3.1.6 인덱스 머지 - 교집합(index_merge_intersection)
+- 실행 계획의 Extra 컬럼에 "Using intersect"라고 표시됨
+    - 여러 개의 인덱스를 각각 검색해서 그 결과의 교집합만 반환했다는 것을 의미함
+- 인덱스 머지 - 교집합 예제
+    - 쿼리문
+        ```sql
+        EXPLAIN SELECT *
+        FROM employees
+        WHERE first_name='Georgi' AND emp_no BETWEEN 10000 AND 20000;
+        ```
+    - 실행 계획
+        ```
+        +-------------+-----------------------+---------+----------------------------------------------------+
+        | type        | key                   | key_len | Extra                                              |
+        +-------------+-----------------------+---------+----------------------------------------------------+
+        | index_merge | ix_firstname, PRIMARY | 62,4    | Using intersect(ix_firstname,PRIMARY); Using where |
+        +-------------+-----------------------+---------+----------------------------------------------------+
+        ```
+    - 두 조건을 만족하는 레코드 건수는 14건 밖에 안되지만, 각각 조건을 일치하는 건수는 253건, 10000건임
+        -> 각각 인덱스 스캔을 할 경우 인덱스 스캔 비효율 발생
+    - 이런 경우 인덱스 머지 교집합을 활성화하여 최적화시키는 것이 효율적
+
+#### 9.3.1.7 인덱스 머지 - 합집합(index_merge_union)
+- 인덱스 머지의 "Using union"은 WHERE절에 사용된 **2개 이상의 조건이 각각의 인덱스를 사용하되 OR 연산자로 연결된 경우** 사용되는 최적화
+- 실행 계획의 Extra 컬럼에 "Using union"라고 표시됨
+- 인덱스 머지 - 합집합 예제
+    - 쿼리문
+        ```sql
+        SELECT *
+        FROM employees
+        WHERE first_name='Matt' OR hire_date ='1987-03-31';
+        ```
+    - 실행 계획
+        ```
+        +-------------+---------------------------+---------+------------------------------------------+
+        | type        | key                       | key_len | Extra                                    |
+        +-------------+---------------------------+---------+------------------------------------------+
+        | index_merge | ix_firstname, ix_hiredate | 58,3    | Using union(ix_firstname,ix_hiredate);   |
+        +-------------+---------------------------+---------+------------------------------------------+
+        ```
+    - Extra에 출력된 문구는 ix_firstname와 ix_hiredate의 인덱스 검색 결과를 'Union' 알고리즘으로 병합했다는 것을 의미
+- 병합 후 중복 제거는 어떻게 할까?
+    - 각각 인덱스 검색 결과는 PK로 이미 정렬돼 있음
+    - MySQL 서버는 두 집합에서 하나씩 가져와서 서로 비교하며 값이 중복된 레코드들을 정렬 없이 걸러낼 수 있음
+
+#### 9.3.1.8 인덱스 머지 - 정렬 후 합집합(index_merge_sort_union)
+- 인덱스 머지 작업을 하는 도중에 결과의 정렬이 필요한 경우 MySQL 서버는 인덱스 머지 최적화의 'Sort union' 알고리즘을 사용
+- OR 조건 중 하나 이상이 범위 조건(<=, >=, BETWEEN 등)인 경우 PK로 정렬돼있지 않아 별도 정렬 연산이 필요함
+- 예제
+    ```sql
+    SELECT *
+    FROM employees
+    WHERE first_name='Matt'
+        OR hire_date BETWEEN '1987-03-01' AND '1987-03-31'
+    ```
+
+#### 9.3.1.9 세미 조인(semijoin)
+- 세미 조인이란? 실제 조인을 수행하지는 않고, 다른 테이블에서 조건에 일치하는 레코드가 있는지 없는지만 체크하는 최적화 방식
+- 세미조인이 비활성화되는 경우 예제
+    - 쿼리문
+        ```sql
+        SELECT *
+        FROM employees e
+        WHERE e.emp_no IN
+            (SELECT de.emp_no FROM dept_emp de WHERE de.from_date='1995-01-01');
+        ```
+    - 실행 계획
+        ```
+        +-----+-------------+--------+------+-------------+---------+
+        | id  | select_type | table  | type | key         | rows    |
+        +-----+-------------+--------+------+-------------+---------+
+        | 1   | PRIMARY     | e      | ALL  | NULL        | 300363  |
+        | 2   | SUBQUERY    | de     | ref  | ix_fromdate | 57      |
+        +-----+-------------+--------+------+-------------+---------+
+        ```
+    - MySQL서버는 employees 테이블을 풀 스캔하면서 서브쿼리 결과인 57건과 일치하는 지 30만건 넘게 읽는 비효율 발생
+- '='(subquery) 형태와 'IN'(subquery) 형태의 세미 조인 쿼리에 대한 3가지 최적화 방법
+    - 세미 조인 최적화
+    - IN-to_EXISTS 최적화
+    - MATERIALIZATION 최적화
+- 세미 조인 최적화 5가지 전략
+    - Table Pull-out
+    - Duplicate Weed-out
+    - First Match
+    - Loose Scan
+    - Materialization
+
+#### 9.3.1.10 테이블 풀-아웃(Table Pull-out)
+- 세미 조인의 서브쿼리에 사용된 테이블을 아우터 쿼리 변환하여 조인 구문 실행하는 최적화 방식
+- 풀-아웃이 가장 빈번하게 사용되는 케이스는 IN(subquery) 형태의 세미 조인 테이블
+- Table pullout 최적화의 몇 가지 제한 사항과 특성
+    - Table pullout 최적화는 세미 조인 서브쿼리에서만 사용 가능함
+    - Table pullout 최적화는 서브쿼리 부분이 UNIQUE 인덱스나 PK 룩업으로 결과가 1건인 경우에는 사용 가능함
+    - Table pullout이 적용된다고 하더라도 기존 쿼리에서 가능했던 최적화 방법이 사용 불가능한 것은 아니므로 MySQL에서는 가능하다면 Table pullout 최적화를 최대한 적용함
+    - Table pullout 최적화는 서브쿼리의 테이블을 아우터 쿼리로 가져와서 조인으로 풀어쓰는 최적화를 수행하는데, 만약 서브쿼리의 모든 테이블이 아우터 쿼리로 끄집어 낼 수 있다면 서브쿼리 자체는 없어짐
+    - MySQL에서는 "최대한 서브쿼리를 조인으로 풀어서 사용해라"라는 튜닝 가이드가 많은데, Table pullout 최적화는 사실 이 가이드를 그대로 실행하는 것임. 이제부터는 서브쿼리를 조인으로 풀어서 사용할 필요가 없음
+- 테이블 풀 아웃 최적화 예제
+    - 쿼리문
+        ```sql
+        EXPLAIN SELECT * FROM employees e 
+        WHERE e.emp_no IN (
+                            SELECT de.emp_no FROM dept_emp de
+                            WHERE de.dept_no='d009'
+                            );
+        ```
+    - 실행 계획
+        ```
+        +-----+-------------+--------+--------+-------------+--------+--------------+
+        | id  | select_type | table  | type   | key         | rows   | Extra        |
+        +-----+-------------+--------+--------+-------------+--------+--------------+
+        | 1   | SIMPLE      | e      | ref    | PRIMARY     | 46012  | Using index; |
+        | 1   | SIMPLE      | de     | eq_ref | PRIMARY     | 1      | NULL         |
+        +-----+-------------+--------+--------+-------------+--------+--------------+
+        ```
+        - 가장 중요한 부분은 id 컬럼의 값이 모두 1이라는 것인데, 두 테이블이 서브쿼리 형태가 아니라 조인으로 처리했음을 의미함
+
+#### 9.3.1.11 퍼스트 매치(firstmatch)
+- IN(subquery) 형태의 세미 조인을 EXISTS(subquery) 형태로 튜닝한 것과 비슷한 방법으로 실행됨
+- 퍼스트 매치 최적화 예제
+    - 쿼리문
+        ```sql
+        EXPLAIN SELECT *
+        FROM employees e 
+        WHERE e.first_name='Matt'
+            AND e.emp_no IN (
+                            SELECT t.emp_no FROM titles t
+                            WHERE t.from_date BETWEEN '1995-01-01' AND '1995-01-30'
+                            );
+    ```
+    - 실행 계획
+        ```
+        +-----+-------+------+--------------+------+-----------------------------------------+
+        | id  | table | type | key          | rows | Extra                                   |
+        +-----+-------+------+--------------+------+-----------------------------------------+
+        | 1   |  e    | ref  | ix_firstname | 233  | NULL                                    |
+        | 1   |  t    | ref  | PRIMARY      | 1    | Using where; Using index; FirstMatch(e) |
+        +-----+-------+------+--------------+------+-----------------------------------------+
+        ```
+
+#### 9.3.1.12 루스 스캔(loosescan)
+- 인덱스를 사용하는 GROUP BY 최적화 방법에서 살펴본 "Using index for group-by"의 루스 인덱스 스캔(Loose Index Scan)과 비슷한 읽기 방식을 사용함
+- 루스 스캔 최적화 예제
+    - 쿼리문
+        ```sql
+        EXPLAIN 
+        SELECT * FROM departments d 
+        WHERE d.dept_no IN (
+                            SELECT de.dept_no FROM dept_emp de
+                            );
+        ```
+    - 실행 계획
+        ```
+        +-----+-------+--------+--------------+---------+------------------------+
+        | id  | table | type   | key          | rows    | Extra                  |
+        +-----+-------+--------+--------------+---------+------------------------+
+        | 1   |  de   | index  | PRIMARY      | 331143  | Using index; LooseScan |
+        | 1   |  e    | eq_ref | PRIMARY      | 1       | NULL                   |
+        +-----+-------+--------+--------------+---------+------------------------+
+        ```
+
+#### 9.3.1.13 구체화(Materialization)
+- 구체화란? 세미 조인에 사용된 서브쿼리를 통째로 구체화해서 쿼리를 최적화
+    - 내부 임시 테이블을 생성
+- 구체화 최적화 예제
+    - 쿼리문
+        ```sql
+        EXPLAIN 
+        SELECT * FROM employees e 
+        WHERE e.emp_no IN (
+                            SELECT t.emp_no FROM titles t
+                            WHERE t.from_date = '1995-01-01'
+                            );
+        ```
+    - 실행 계획
+        ```
+        +-----+--------------+-------------+--------+-------------+-----------------------+
+        | id  | select_type  | table       | type   | key         | ref                   |
+        +-----+--------------+-------------+--------+-------------+-----------------------+
+        | 1   | SIMPLE       | <subquery2> | ALL    | NULL        | NULL                  |
+        | 1   | SIMPLE       | e           | eq_ref | PRIMARY     | <subquery2>, emp_no   |
+        | 2   | MATERIALIZED | de          | ref    | ix_fromdate | const                 |
+        +-----+--------------+-------------+--------+-------------+-----------------------+
+        ```
+    - 쿼리에서 사용하는 테이블은 2개인데, 실행 계획은 3개 라인으로 출력됨 => 임시 테이블이 생성됨
+    - dept_emp 테이블을 읽는 서브쿼리가 먼저 실행되어 그 결과로 임시 테이블(subquery2)가 만들어짐
+    - 최종적으로 서브쿼리가 구체화된 임시 테이블(subquery2)과 employees 테이블을 조인해서 결과를 반환함
+- Materialization 최적화가 사용될 수 있는 형태의 쿼리에도 몇 가지 제한 사항과 특성
+    - IN(subquery)에서 서브쿼리는 상관 서브쿼리(Correlated subquery)가 아니어야 함
+    - 서브쿼리는 GROUP BY나 집합 함수들이 사용돼도 구체화를 사용할 수 있음
+    - 구체화가 사용된 경우에는 내부 임시 테이블이 사용됨
+
+#### 9.3.1.14 중복 제거(Duplicated Weed-out)
+- 세미 조인 서브쿼리를 일반적인 INNER JOIN 쿼리로 바꿔서 실행하고 마지막에 중복된 레코드를 제거하는 방법으로 처리
+- 중복 제거 최적화 예제
+    - 원본 쿼리
+        ```sql
+        EXPLAIN 
+        SELECT * FROM employees e 
+        WHERE e.emp_no IN (
+                            SELECT s.emp_no FROM salaries s
+                            WHERE s.salary>150000
+                            );
+        ```
+    - 중복 제거 최적화로 쿼리 변환하여 처리되는 쿼리문
+        ```sql
+        SELECT * FROM employees e, salaries s
+        WHERE e.emp_no=s.emp_no AND s.salary>150000
+        GROUP BY e.emp_no;
+        ```
+    - 중복 제거 최적화 과정
+        1. salaries 테이블의 ix_salary 인덱스를 스캔해서 salary가 150000보다 큰 사원을 검색해 employees 테이블 조인을 실행
+        1. 조인된 결과를 임시 테이블에 저장
+        1. 임시 테이블에 저장된 결과에서 emp_no 기준으로 중복 제거
+        1. 중복을 제거하고 남은 레코드를 최종적으로 반환
+    - 실행 계획
+        ```
+        +-----+-------------+-------+--------+-------------+-------------------------------------------+
+        | id  | select_type | table | type   | key         | Extra                                     |
+        +-----+-------------+-------+--------+-------------+-------------------------------------------+
+        | 1   | SIMPLE      | s     | range  | ix_salary   | Using where; Using index; Start temporary |
+        | 1   | SIMPLE      | e     | eq_ref | PRIMARY     | End temporary                             |
+        +-----+-------------+-------+--------+-------------+-------------------------------------------+
+        ```
+- 중복 제거 최적화의 장점과 제약 사항
+    - 서브쿼리가 상관 서브쿼리라고 하더라도 사용할 수 있는 최적화
+    - 서브쿼리가 GROUP BY나 집합 함수가 사용된 경우에는 사용될 수 없음
+    - 중복 제거 최적화는 서브쿼리의 테이블을 조인으로 처리하기 때문에 최적화할 수 있는 방법이 많음
