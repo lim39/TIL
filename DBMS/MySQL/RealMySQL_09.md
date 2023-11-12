@@ -525,7 +525,7 @@ mysql> SHOW STATUS LIKE 'Sort%';
                             SELECT t.emp_no FROM titles t
                             WHERE t.from_date BETWEEN '1995-01-01' AND '1995-01-30'
                             );
-    ```
+        ```
     - 실행 계획
         ```
         +-----+-------+------+--------------+------+-----------------------------------------+
