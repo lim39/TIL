@@ -566,8 +566,8 @@ mysql> SHOW STATUS LIKE 'Sort%';
         EXPLAIN 
         SELECT * FROM employees e 
         WHERE e.emp_no IN (
-                            SELECT t.emp_no FROM titles t
-                            WHERE t.from_date = '1995-01-01'
+                            SELECT de.emp_no FROM dept_emp_no de
+                            WHERE de.from_date = '1995-01-01'
                             );
         ```
     - 실행 계획
